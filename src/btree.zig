@@ -326,6 +326,8 @@ fn compareUsize(a: usize, b: usize) std.math.Order {
     return std.math.order(a, b);
 }
 
+const less_than_fn = std.sort.asc(usize);
+
 /// Check that the btree is valid by ensuring all the invariants
 /// regarding a btree is maintained.
 fn validateBtree(btree: *const BtreeType) !void {
@@ -339,12 +341,26 @@ fn validateBtree(btree: *const BtreeType) !void {
 
     try testing.expect(btree.root.keys.items.len >= 1);
     try testing.expect(btree.root.keys.items.len < 2 * btree.degree);
+    try testing.expect(std.sort.isSorted(usize, btree.root.keys.items, {}, less_than_fn));
     try expectEqual(btree.root.values.items.len, btree.root.keys.items.len);
+
     if (btree.root.isLeaf() == false) {
         try testing.expectEqual(btree.root.children.items.len, btree.root.keys.items.len + 1);
 
-        for (btree.root.children.items) |*node| {
+        for (btree.root.children.items, 0..) |*node, i| {
             try validateNode(node, btree.degree);
+
+            if (i == btree.root.keys.items.len) {
+                const key = btree.root.keys.items[i - 1];
+                for (node.keys.items) |k| {
+                    try testing.expect(k >= key);
+                }
+            } else {
+                const key = btree.root.keys.items[i];
+                for (node.keys.items) |k| {
+                    try testing.expect(k < key);
+                }
+            }
         }
     }
 }
@@ -358,11 +374,25 @@ fn validateNode(node: *const BtreeType.Node, degree: u16) !void {
     try testing.expect(node.keys.items.len >= keys_min);
     try testing.expect(node.keys.items.len < keys_max);
     try expectEqual(node.values.items.len, node.keys.items.len);
+    try testing.expect(std.sort.isSorted(usize, node.keys.items, {}, less_than_fn));
+
     if (node.isLeaf() == false) {
         try testing.expectEqual(node.children.items.len, node.keys.items.len + 1);
 
-        for (node.children.items) |*child| {
+        for (node.children.items, 0..) |*child, i| {
             try validateNode(child, degree);
+
+            if (i == node.keys.items.len) {
+                const key = node.keys.items[i - 1];
+                for (child.keys.items) |k| {
+                    try testing.expect(k >= key);
+                }
+            } else {
+                const key = node.keys.items[i];
+                for (child.keys.items) |k| {
+                    try testing.expect(k < key);
+                }
+            }
         }
     }
 }
