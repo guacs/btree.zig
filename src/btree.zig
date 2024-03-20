@@ -440,7 +440,7 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
         }
 
         /// Get the value associated with the given key.
-        pub fn get(self: *Self, key: KeyT) ?ValueT {
+        pub fn get(self: *const Self, key: KeyT) ?ValueT {
             // Traverse the tree from the root node onwards. In each node see if the key exists,
             // and if we found it then we can stop traversing. If the key wasn't found, then we have two cases:
             //    - node we're searching is a leaf node in which case the key doesn't exist
@@ -479,7 +479,7 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
         ///
         /// The pointers are invalidated on any call that may insert or remove values
         /// from the btree.
-        pub fn getPtr(self: *Self, key: KeyT) ?*ValueT {
+        pub fn getPtr(self: *const Self, key: KeyT) ?*ValueT {
             var i: usize = 0;
             var curr_node: *const Node = &self.root;
             const depth = self.depth;
