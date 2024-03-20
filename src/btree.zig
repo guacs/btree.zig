@@ -18,6 +18,10 @@ inline fn splitArrayListAssumeCapacity(comptime T: type, one: *ArrayList(T), two
     one.shrinkRetainingCapacity(idx);
 }
 
+fn newline() void {
+    std.debug.print("\n", .{});
+}
+
 pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: KeyT, b: KeyT) std.math.Order)) type {
     return struct {
         const Self = @This();
@@ -36,9 +40,16 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
             keys: KeyArray,
             values: ValueArray,
             // Only for internal nodes.
+            // TODO: Consider making this ?ChildrenArray.
             children: ChildrenArray,
 
             fn initLeafNode(self: *Node, keys_max: usize, allocator: Allocator) !void {
+                // TODO: multi-item pointer (allows for pointer arithmetic). See if switching to this
+                // and then storing only one `len: usize` and three pointers (to the keys, values and children)
+                // is more performant, and if so, by how much. This is essentially what is being done in the
+                // Rust version. If this is more performant, the question to answer would be whether the speed
+                // up is worth the complexity. Regardless, I want to implement such a version because it would
+                // be fun and a nice opportunity to understand how to deal with multi-item pointers in Zig.
                 self.* = .{
                     .keys = try KeyArray.initCapacity(allocator, keys_max),
                     .values = try ValueArray.initCapacity(allocator, keys_max),
@@ -113,6 +124,103 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                 return null;
             }
 
+            fn removeLeaf(self: *Node, idx: usize) void {
+                _ = self.keys.orderedRemove(idx);
+                _ = self.values.orderedRemove(idx);
+            }
+
+            /// Handle the underflowing of the child at the given index by either
+            /// stealing from one of it's siblings or merging with one of it's
+            /// siblings.
+            ///
+            /// This takes an allocator, but not for allocating memory for deallocating
+            /// a node in case of a merge.
+            fn handleUnderflowOfChild(self: *Node, underflowed_child_idx: usize, allocator: Allocator) void {
+                if (underflowed_child_idx == 0) {
+                    const right_child = &self.children.items[underflowed_child_idx + 1];
+                    if (right_child.hasEnoughToSteal()) {
+                        self.stealFromRight(underflowed_child_idx);
+                    } else {
+                        self.mergeChildren(underflowed_child_idx, allocator);
+                    }
+                } else {
+                    const left_child = &self.children.items[underflowed_child_idx - 1];
+                    if (left_child.hasEnoughToSteal()) {
+                        self.stealFromLeft(underflowed_child_idx);
+                    } else {
+                        self.mergeChildren(underflowed_child_idx - 1, allocator);
+                    }
+                }
+            }
+
+            /// Merge the left and right children into one node.
+            fn mergeChildren(self: *Node, left_child_idx: usize, allocator: Allocator) void {
+                const key = self.keys.orderedRemove(left_child_idx);
+                const value = self.values.orderedRemove(left_child_idx);
+                var right_child = self.children.orderedRemove(left_child_idx + 1);
+                defer right_child.deinitOnlySelf(allocator);
+
+                // Move the key from the parent into the left child.
+                var left_child = &self.children.items[left_child_idx];
+                left_child.keys.appendAssumeCapacity(key);
+                left_child.values.appendAssumeCapacity(value);
+
+                // Move everything from the right child into the left child.
+                left_child.keys.appendSliceAssumeCapacity(right_child.keys.items);
+                left_child.values.appendSliceAssumeCapacity(right_child.values.items);
+
+                if (left_child.isLeaf() == false) {
+                    assert(right_child.isLeaf() == false);
+
+                    left_child.children.appendSliceAssumeCapacity(right_child.children.items);
+                }
+            }
+
+            /// Move the biggest key in the left child, and the key in this node in the right direction one time.
+            fn stealFromLeft(self: *Node, underflowed_child_idx: usize) void {
+                const left_child_idx = underflowed_child_idx - 1;
+
+                var left_child = &self.children.items[left_child_idx];
+                var key = left_child.keys.pop();
+                var value = left_child.values.pop();
+
+                // Move the parent's key and value into `key` and `value`.
+                std.mem.swap(KeyT, &key, &self.keys.items[left_child_idx]);
+                std.mem.swap(ValueT, &value, &self.values.items[left_child_idx]);
+
+                var right_node = &self.children.items[underflowed_child_idx];
+                right_node.insertLeafAssumeCapacity(key, value, 0);
+
+                if (left_child.isLeaf() == false) {
+                    assert(right_node.isLeaf() == false);
+
+                    const child_to_steal = left_child.children.pop();
+                    right_node.children.insertAssumeCapacity(0, child_to_steal);
+                }
+            }
+
+            /// Move the smallest key in the right child, the key in this node in the left direction one time.
+            fn stealFromRight(self: *Node, underflowed_child_idx: usize) void {
+                var right_child = &self.children.items[underflowed_child_idx + 1];
+                var key = right_child.keys.orderedRemove(0);
+                var value = right_child.values.orderedRemove(0);
+
+                std.mem.swap(KeyT, &key, &self.keys.items[underflowed_child_idx]);
+                std.mem.swap(ValueT, &value, &self.values.items[underflowed_child_idx]);
+
+                var left_child = &self.children.items[underflowed_child_idx];
+                left_child.keys.appendAssumeCapacity(key);
+                left_child.values.appendAssumeCapacity(value);
+
+                // Steal the child as well.
+                if (right_child.isLeaf() == false) {
+                    assert(left_child.isLeaf() == false);
+
+                    const child_to_steal = right_child.children.orderedRemove(0);
+                    left_child.children.appendAssumeCapacity(child_to_steal);
+                }
+            }
+
             inline fn insertLeafAssumeCapacity(self: *Node, key: KeyT, value: ValueT, idx: usize) void {
                 self.keys.insertAssumeCapacity(idx, key);
                 self.values.insertAssumeCapacity(idx, value);
@@ -156,24 +264,45 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                 return self.keys.items.len;
             }
 
+            inline fn capacity(self: *const Node) usize {
+                return self.keys.capacity;
+            }
+
             inline fn isFull(self: *const Node) bool {
-                return self.keys.items.len == self.keys.capacity;
+                return self.len() >= self.capacity();
+            }
+
+            inline fn isUnderflow(self: *const Node) bool {
+                return self.len() < self.capacity() / 2;
+            }
+
+            /// Check whether this node has enough elements for us to steal one
+            /// without it resulting in an underflow.
+            inline fn hasEnoughToSteal(self: *const Node) bool {
+                return self.len() > self.capacity() / 2;
             }
 
             inline fn isLeaf(self: *const Node) bool {
                 return self.children.items.len == 0;
             }
 
-            /// Free the memory used by this node and all it's children.
-            fn deinit(self: *Node, allocator: Allocator) void {
+            /// This frees only the resources used by this node without including
+            /// all the memory used by it's children.
+            fn deinitOnlySelf(self: *Node, allocator: Allocator) void {
                 self.keys.deinit(allocator);
                 self.values.deinit(allocator);
+                if (self.isLeaf() == false) {
+                    self.children.deinit(allocator);
+                }
+            }
 
+            /// Free the memory used by this node and all it's children.
+            fn deinit(self: *Node, allocator: Allocator) void {
                 for (self.children.items) |*child| {
                     child.deinit(allocator);
                 }
 
-                self.children.deinit(allocator);
+                self.deinitOnlySelf(allocator);
             }
 
             fn print(self: *const Node, indent: usize, child_num: usize, is_root: bool) void {
@@ -303,6 +432,113 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
             // reach here. If we did, then we traversed more than the depth of the tree which is a bug.
             // `maximum number of nodes traversed = depth of btree`
             unreachable;
+        }
+
+        pub fn remove(self: *Self, key: KeyT) !bool {
+            // We first find the key within the btree.
+            // If it doesn't exist, then we don't need to do anything. The simplest case.
+            //
+            // The logic for removing the key differs based on the node type:
+            //
+            //     - If the node is a leaf node, then we simply remove the key and it's value
+            //
+            //     - If the node is an internal node, then we swap that element with the smallest key
+            //       in it's right subtree. This element will always be at a leaf node. Then we remove
+            //       from that leaf node that contained the smallest key. By doing this swapping, we ensure
+            //       that we maintain the invariant of a btree that all the elements in the right child
+            //       of a key must be greater than or equal to the key.
+            //
+            // Removing results in an underflow, but we can steal without undeflowing (assume we're stealing from the left sibling):
+            //
+            //     - We take the key from the "left" parent of the node that underflowed, and set that as the first key.
+            //       The largest key in the left sibling takes the place of the key that the underflowed node took in the
+            //       left parent. We can't just take directly from the left sibling because that would break the invariant
+            //       of all the keys in the right subtree of a node must have a value greater than or equal to the key (this
+            //       invariant would be broken for the "left" parent of the underflowed node).
+            //
+            //     - The rightmost child of the key that was taken now becomes the leftmost child of the first key
+            //       in the undeflowed node. Once again, this allows the maintaining of the invariants.
+            //
+            // Removing results in an underflow, and stealing also results in an underflow (assume we tried to steal from the left sibling):
+            //
+            //     - We have to merge the underflowed node with it's left sibling. We insert the common parent key into it's left child, and then
+            //       we move all the keys in the underflowed node into the left sibling. Then we remove the parent key from the common parent node.
+            //
+            //     - The merged node will always have `2 * degree - 2` keys which means that we never have to deal
+            //       splitting etc.
+            //
+            //     - Removing the key from the parent may result in it underflowing, in which case we have to follow the logic of
+            //       removing a key again.
+            //
+
+            const depth = self.depth;
+            var i: usize = 0;
+            var stack = try SearchStack.initCapacity(self.allocator, depth);
+            defer stack.deinit(self.allocator);
+
+            var curr_node = &self.root;
+            var idx = search: {
+                while (i < depth) : (i += 1) {
+                    switch (curr_node.search(key)) {
+                        .found => |idx| {
+                            break :search idx;
+                        },
+                        .not_found => |idx| {
+                            if (curr_node.isLeaf()) {
+                                return false;
+                            }
+
+                            stack.appendAssumeCapacity(.{ .node = curr_node, .idx = idx });
+                            curr_node = &curr_node.children.items[idx];
+                        },
+                    }
+                }
+                unreachable;
+            };
+
+            if (curr_node.isLeaf() == false) {
+                var internal_node = curr_node;
+                // If it's an internal node, then we have to find the smallest key-value pair and swap it.
+                // To do this, we first go to it's right child, and then we keep going left until we hit a leaf node.
+                curr_node = &curr_node.children.items[idx + 1];
+
+                while (curr_node.isLeaf() == false) {
+                    stack.appendAssumeCapacity(.{ .node = curr_node, .idx = 0 });
+                    curr_node = &curr_node.children.items[0];
+                }
+
+                std.mem.swap(KeyT, &internal_node.keys.items[idx], &curr_node.keys.items[0]);
+                std.mem.swap(ValueT, &internal_node.values.items[idx], &curr_node.values.items[0]);
+                idx = 0;
+            }
+
+            assert(curr_node.isLeaf());
+            curr_node.removeLeaf(idx);
+
+            while (curr_node.isUnderflow()) {
+                if (stack.popOrNull()) |node_path| {
+                    node_path.node.handleUnderflowOfChild(node_path.idx, self.allocator);
+                    curr_node = node_path.node;
+                } else {
+                    // We took an element from the root node. If the root node is an internal node,
+                    // then we make it's only child into the new root. If it's a leaf node, we just
+                    // leave it alone since this may happen when all the elements from the btree are
+                    // deleted.
+                    if (self.root.len() == 0 and self.root.isLeaf() == false) {
+                        assert(self.root.children.items.len == 1);
+                        var old_root = self.root;
+                        defer old_root.deinitOnlySelf(self.allocator);
+
+                        self.root = self.root.children.pop();
+                    }
+
+                    break;
+                }
+            }
+
+            self.len -= 1;
+
+            return true;
         }
 
         pub fn deinit(self: *Self) void {
@@ -565,5 +801,267 @@ test "btree: put and get random with 10000 with degree 50" {
         try expectEqual(btree.get(kvp.key_ptr.*), kvp.value_ptr.*);
     }
 
+    try validateBtree(&btree);
+}
+
+test "btree(remove): remove from leaf node without underflow" {
+    var btree: BtreeType = undefined;
+    try btree.init(2, testing.allocator);
+    defer btree.deinit();
+
+    for (1..8) |i| {
+        try btree.put(i, i);
+    }
+
+    // 6 should be in the rightmost leaf node
+    const removed = try btree.remove(6);
+
+    try testing.expect(removed);
+    try expectEqual(btree.get(6), null);
+    try expectEqual(btree.len, 6);
+    try validateBtree(&btree);
+}
+
+test "btree(remove): remove from internal node without underflow" {
+    var btree: BtreeType = undefined;
+    try btree.init(2, testing.allocator);
+    defer btree.deinit();
+
+    for (1..14) |i| {
+        try btree.put(i, i);
+    }
+
+    // 10 should be in the rightmost child of the root node.
+    // This should cause the actual removal to be in the leftmost node which should be full (i.e. no underflow).
+    const removed = try btree.remove(10);
+
+    try testing.expect(removed);
+    try expectEqual(btree.get(10), null);
+    try expectEqual(btree.len, 12);
+    try validateBtree(&btree);
+}
+
+test "btree(remove): remove with underflow resulting in stealing from left sibling (leaf node)" {
+    // 1, 5, 6, 2, 3
+    var btree: BtreeType = undefined;
+    try btree.init(2, testing.allocator);
+    defer btree.deinit();
+
+    // This should result in a btree with the root node having 5. The left child
+    // will have 1, 2, 3 and the right child will have 6.
+    try btree.put(1, 1);
+    try btree.put(5, 5);
+    try btree.put(6, 6);
+    try btree.put(2, 2);
+    try btree.put(3, 3);
+
+    // This should result in stealing the '3' from the left child.
+    const removed = try btree.remove(6);
+
+    try testing.expect(removed);
+    try expectEqual(btree.get(6), null);
+    try expectEqual(btree.len, 4);
+    try expectEqual(btree.get(1), 1);
+    try expectEqual(btree.get(2), 2);
+    try expectEqual(btree.get(3), 3);
+    try expectEqual(btree.get(5), 5);
+    try validateBtree(&btree);
+}
+
+test "btree(remove): remove with underlfow resulting in stealing from right sibling (leaf node)" {
+    // 1, 5, 7, 6
+
+    var btree: BtreeType = undefined;
+    try btree.init(2, testing.allocator);
+    defer btree.deinit();
+
+    // This should result in a btree with the root node having 5. The left child
+    // will have 1 while the right child will have 6, 7.
+    try btree.put(1, 1);
+    try btree.put(5, 5);
+    try btree.put(6, 6);
+    try btree.put(7, 7);
+
+    // This should result in stealing the '6' from the right child.
+    const removed = try btree.remove(1);
+
+    try testing.expect(removed);
+    try expectEqual(btree.get(1), null);
+    try expectEqual(btree.len, 3);
+    try expectEqual(btree.get(5), 5);
+    try expectEqual(btree.get(6), 6);
+    try expectEqual(btree.get(7), 7);
+    try validateBtree(&btree);
+}
+
+test "btree(remove): underflow of right child leads to merging" {
+    var btree: BtreeType = undefined;
+    try btree.init(2, testing.allocator);
+    defer btree.deinit();
+
+    // This should result in the two leftmost children of the root node having
+    // one key each: 1 and 10. Thus, removing 10 should result in merging.
+    try btree.put(1, 1);
+    try btree.put(5, 5);
+    try btree.put(10, 10);
+    try btree.put(11, 11);
+    try btree.put(12, 12);
+    try btree.put(13, 13);
+
+    const removed = try btree.remove(10);
+
+    try testing.expect(removed);
+    try expectEqual(btree.get(10), null);
+    try expectEqual(btree.get(1), 1);
+    try expectEqual(btree.get(5), 5);
+    try expectEqual(btree.get(11), 11);
+    try expectEqual(btree.get(12), 12);
+    try expectEqual(btree.get(13), 13);
+    try validateBtree(&btree);
+}
+
+test "btree(remove): underflow of left child leads to merging" {
+    var btree: BtreeType = undefined;
+    try btree.init(2, testing.allocator);
+    defer btree.deinit();
+
+    // This should result in the two leftmost children of the root node having
+    // one key each: 1 and 10. Thus, removing 10 should result in merging.
+    try btree.put(1, 1);
+    try btree.put(5, 5);
+    try btree.put(10, 10);
+    try btree.put(11, 11);
+    try btree.put(12, 12);
+    try btree.put(13, 13);
+
+    const removed = try btree.remove(1);
+
+    try testing.expect(removed);
+    try expectEqual(btree.get(1), null);
+    try expectEqual(btree.get(5), 5);
+    try expectEqual(btree.get(10), 10);
+    try expectEqual(btree.get(11), 11);
+    try expectEqual(btree.get(12), 12);
+    try expectEqual(btree.get(13), 13);
+    try validateBtree(&btree);
+}
+
+test "btree(remove): sequential removes" {
+    var btree: BtreeType = undefined;
+    try btree.init(2, testing.allocator);
+    defer btree.deinit();
+
+    for (0..1000) |i| {
+        try btree.put(i, i);
+    }
+
+    for (0..1000) |i| {
+        const removed = try btree.remove(i);
+
+        try testing.expect(removed);
+        try validateBtree(&btree);
+    }
+
+    try expectEqual(btree.len, 0);
+}
+
+test "btree(remove): sequential removes in reverse order" {
+    var btree: BtreeType = undefined;
+    try btree.init(2, testing.allocator);
+    defer btree.deinit();
+
+    for (0..1000) |i| {
+        try btree.put(i, i);
+    }
+
+    var i: usize = 1000;
+    while (i > 0) {
+        i -= 1;
+        const removed = try btree.remove(i);
+
+        try testing.expect(removed);
+        try validateBtree(&btree);
+    }
+
+    try expectEqual(btree.len, 0);
+}
+
+test "btree(crud): 10000 random elements with degree 4" {
+    var prng = std.Random.DefaultPrng.init(10);
+    var random = prng.random();
+
+    var btree: BtreeType = undefined;
+    try btree.init(4, testing.allocator);
+    defer btree.deinit();
+
+    var map = std.hash_map.AutoHashMap(usize, usize).init(testing.allocator);
+    defer map.deinit();
+
+    for (0..10000) |_| {
+        const key = random.int(usize);
+
+        // Put, get, or delete
+        switch (random.intRangeLessThan(u8, 0, 3)) {
+            0 => {
+                const value = random.int(usize);
+                try btree.put(key, value);
+                try map.put(key, value);
+            },
+            1 => {
+                try expectEqual(btree.get(key), map.get(key));
+            },
+            2 => {
+                const map_removed = map.remove(key);
+                const btree_removed = try btree.remove(key);
+
+                try expectEqual(btree_removed, map_removed);
+            },
+            else => unreachable,
+        }
+
+        try validateBtree(&btree);
+    }
+
+    try expectEqual(btree.len, map.count());
+    try validateBtree(&btree);
+}
+
+test "btree(crud): 10000 random elements with degree 20" {
+    var prng = std.Random.DefaultPrng.init(10);
+    var random = prng.random();
+
+    var btree: BtreeType = undefined;
+    try btree.init(20, testing.allocator);
+    defer btree.deinit();
+
+    var map = std.hash_map.AutoHashMap(usize, usize).init(testing.allocator);
+    defer map.deinit();
+
+    for (0..10000) |_| {
+        const key = random.int(usize);
+
+        // Put, get, or delete
+        switch (random.intRangeLessThan(u8, 0, 3)) {
+            0 => {
+                const value = random.int(usize);
+                try btree.put(key, value);
+                try map.put(key, value);
+            },
+            1 => {
+                try expectEqual(btree.get(key), map.get(key));
+            },
+            2 => {
+                const map_removed = map.remove(key);
+                const btree_removed = try btree.remove(key);
+
+                try expectEqual(btree_removed, map_removed);
+            },
+            else => unreachable,
+        }
+
+        try validateBtree(&btree);
+    }
+
+    try expectEqual(btree.len, map.count());
     try validateBtree(&btree);
 }
