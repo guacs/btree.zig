@@ -18,10 +18,24 @@ inline fn splitArrayListAssumeCapacity(comptime T: type, one: *ArrayList(T), two
     one.shrinkRetainingCapacity(idx);
 }
 
-fn newline() void {
-    std.debug.print("\n", .{});
-}
-
+/// This a BTree that guarantees the following invariants:
+///     - number of keys in each node is within the range [degree - 1, 2 * degree - 1] except for
+///       root nodes which may contain [0, 2 * degree -1] keys
+///     - number of children in each non-leaf node is `number of keys + 1`
+///     - all keys in a node are in sorted order
+///
+/// This follows an API similar to std.HashMap.
+///
+/// Initilization should be done in the following manner:
+///
+/// ```
+/// const BTree = Btree(usize, usize, compareUsizeFn);
+///
+/// var btree: BTree = undefined;
+/// btree.init(3, allocator);
+/// defer btree.deinit();
+/// ```
+///
 pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: KeyT, b: KeyT) std.math.Order)) type {
     return struct {
         const Self = @This();
@@ -65,6 +79,8 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                 };
             }
 
+            /// Find either the index that holds the key or the index of the child
+            /// subtree that must contain the key, if it exists.
             fn search(self: *const Node, key: KeyT) SearchResult {
                 for (self.keys.items, 0..) |k, idx| {
                     switch (compare_fn(k, key)) {
@@ -80,6 +96,7 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                 return .{ .not_found = self.len() };
             }
 
+            /// Insert into the node as if it was a leaf node.
             fn insertLeaf(self: *Node, key: KeyT, value: ValueT, idx: usize, allocator: Allocator) !?SplitResult {
                 if (self.isFull()) {
                     var split_result = try self.splitLeaf(allocator);
@@ -105,6 +122,7 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                 return null;
             }
 
+            /// Insert into the node as if it was an internal node.
             fn insertInternal(self: *Node, key: KeyT, value: ValueT, right_child: Node, idx: usize, allocator: Allocator) !?SplitResult {
                 if (self.isFull()) {
                     var split_result = try self.splitInternal(allocator);
@@ -124,7 +142,12 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                 return null;
             }
 
-            fn removeLeaf(self: *Node, idx: usize) void {
+            /// Remove the value from the node at the given index.
+            ///
+            /// This must be called only on a leaf node.
+            inline fn removeLeaf(self: *Node, idx: usize) void {
+                assert(self.isLeaf());
+
                 _ = self.keys.orderedRemove(idx);
                 _ = self.values.orderedRemove(idx);
             }
@@ -248,6 +271,7 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                 return .{ .key = self.keys.pop(), .value = self.values.pop(), .new_node = new_node };
             }
 
+            /// Same as `splitLeaf` except the children are split as well.
             inline fn splitInternal(self: *Node, allocator: Allocator) !SplitResult {
                 const pivot_idx = self.len() / 2 + 1;
                 var new_node: Node = undefined;
@@ -260,10 +284,12 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                 return .{ .key = self.keys.pop(), .value = self.values.pop(), .new_node = new_node };
             }
 
+            /// Get the number of keys in this node.
             inline fn len(self: *const Node) usize {
                 return self.keys.items.len;
             }
 
+            /// Get the maximum number of keys this node can hold.
             inline fn capacity(self: *const Node) usize {
                 return self.keys.capacity;
             }
@@ -320,12 +346,20 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
             }
         };
 
+        /// A read-only field that gives the number of elements in the btree.
         len: usize = 0,
 
+        /// A read-only field that describes the degree of the btree.
         degree: u16,
-        root: Node = undefined,
+
+        /// A read-only field that gives the depth of the btree.
         depth: usize = 1,
 
+        /// Don't touch this. Unless you know what you're doing. Then go nuts.
+        root: Node = undefined,
+
+        /// The allocator used for any allocations/deallocations during the lifetime
+        /// of this btree.
         allocator: std.mem.Allocator,
 
         pub fn init(self: *Self, degree: u16, allocator: Allocator) !void {
@@ -336,6 +370,9 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
             try self.root.initLeafNode(2 * degree - 1, allocator);
         }
 
+        /// Add the given key-value pair to the btree.
+        ///
+        /// This will overwrite any existing values.
         pub fn put(self: *Self, key: KeyT, value: ValueT) !void {
             // We traverse the tree from the root node onwards to see if the key exists.
             // If the key exists, then we simply overwrite the value.
@@ -399,6 +436,7 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
             self.depth += 1;
         }
 
+        /// Get the value associated with the given key.
         pub fn get(self: *Self, key: KeyT) ?ValueT {
             // Traverse the tree from the root node onwards. In each node see if the key exists,
             // and if we found it then we can stop traversing. If the key wasn't found, then we have two cases:
@@ -434,6 +472,9 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
             unreachable;
         }
 
+        /// Remove the key from the btree.
+        ///
+        /// If the key doesn't exist, this is a no-op.
         pub fn remove(self: *Self, key: KeyT) !bool {
             // We first find the key within the btree.
             // If it doesn't exist, then we don't need to do anything. The simplest case.
@@ -512,7 +553,6 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                 idx = 0;
             }
 
-            assert(curr_node.isLeaf());
             curr_node.removeLeaf(idx);
 
             while (curr_node.isUnderflow()) {
@@ -545,6 +585,7 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
             self.root.deinitAlongWithChildren(self.allocator);
         }
 
+        /// Pretty print the btree.
         pub fn print(self: *const Self) void {
             self.root.print(0, 0, true);
         }
