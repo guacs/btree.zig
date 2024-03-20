@@ -158,7 +158,7 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                 const key = self.keys.orderedRemove(left_child_idx);
                 const value = self.values.orderedRemove(left_child_idx);
                 var right_child = self.children.orderedRemove(left_child_idx + 1);
-                defer right_child.deinitOnlySelf(allocator);
+                defer right_child.deinit(allocator);
 
                 // Move the key from the parent into the left child.
                 var left_child = &self.children.items[left_child_idx];
@@ -286,23 +286,23 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                 return self.children.items.len == 0;
             }
 
+            /// Free the memory used by this node and all it's children.
+            fn deinitAlongWithChildren(self: *Node, allocator: Allocator) void {
+                for (self.children.items) |*child| {
+                    child.deinitAlongWithChildren(allocator);
+                }
+
+                self.deinit(allocator);
+            }
+
             /// This frees only the resources used by this node without including
             /// all the memory used by it's children.
-            fn deinitOnlySelf(self: *Node, allocator: Allocator) void {
+            fn deinit(self: *Node, allocator: Allocator) void {
                 self.keys.deinit(allocator);
                 self.values.deinit(allocator);
                 if (self.isLeaf() == false) {
                     self.children.deinit(allocator);
                 }
-            }
-
-            /// Free the memory used by this node and all it's children.
-            fn deinit(self: *Node, allocator: Allocator) void {
-                for (self.children.items) |*child| {
-                    child.deinit(allocator);
-                }
-
-                self.deinitOnlySelf(allocator);
             }
 
             fn print(self: *const Node, indent: usize, child_num: usize, is_root: bool) void {
@@ -527,7 +527,7 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
                     if (self.root.len() == 0 and self.root.isLeaf() == false) {
                         assert(self.root.children.items.len == 1);
                         var old_root = self.root;
-                        defer old_root.deinitOnlySelf(self.allocator);
+                        defer old_root.deinit(self.allocator);
 
                         self.root = self.root.children.pop();
                     }
@@ -542,7 +542,7 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
         }
 
         pub fn deinit(self: *Self) void {
-            self.root.deinit(self.allocator);
+            self.root.deinitAlongWithChildren(self.allocator);
         }
 
         pub fn print(self: *const Self) void {
