@@ -475,6 +475,36 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
             unreachable;
         }
 
+        /// Get the pointer to the value associated with the given key.
+        ///
+        /// The pointers are invalidated on any call that may insert or remove values
+        /// from the btree.
+        pub fn getPtr(self: *Self, key: KeyT) ?*ValueT {
+            var i: usize = 0;
+            var curr_node: *const Node = &self.root;
+            const depth = self.depth;
+
+            while (i < depth) : (i += 1) {
+                const idx = blk: {
+                    switch (curr_node.search(key)) {
+                        .found => |idx| return &curr_node.values.items[idx],
+                        .not_found => |idx| {
+                            // If we get to a leaf node and we don't find it, then the key simply doesn't exist.
+                            if (curr_node.isLeaf()) {
+                                return null;
+                            }
+
+                            break :blk idx;
+                        },
+                    }
+                };
+
+                curr_node = &curr_node.children.items[idx];
+            }
+
+            unreachable;
+        }
+
         /// Get the key-value pair for the smallest key in the btree.
         ///
         /// Returns null if the btree is empty.
