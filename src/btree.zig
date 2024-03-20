@@ -579,7 +579,8 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
 
             var curr_node: *const Node = &self.root;
             while (curr_node.isLeaf() == false) {
-                curr_node = &curr_node.children.getLast();
+                const curr_node_len = curr_node.len();
+                curr_node = &curr_node.children.items[curr_node_len];
             }
             return curr_node;
         }
