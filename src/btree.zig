@@ -50,6 +50,9 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
             idx: usize,
         };
 
+        pub const KeyValuePair = struct { key: KeyT, value: ValueT };
+        pub const KeyValuePairPtr = struct { key: *KeyT, value: *ValueT };
+
         const Node = struct {
             keys: KeyArray,
             values: ValueArray,
@@ -470,6 +473,85 @@ pub fn Btree(comptime KeyT: type, ValueT: type, comptime compare_fn: (fn (a: Key
             // reach here. If we did, then we traversed more than the depth of the tree which is a bug.
             // `maximum number of nodes traversed = depth of btree`
             unreachable;
+        }
+
+        /// Get the key-value pair for the smallest key in the btree.
+        ///
+        /// Returns null if the btree is empty.
+        pub fn getSmallest(self: *const Self) ?KeyValuePair {
+            if (self.len == 0) {
+                return null;
+            }
+
+            const leftmost_child = self.getLefmostChild();
+
+            return .{ .key = leftmost_child.keys.items[0], .value = leftmost_child.values.items[0] };
+        }
+
+        /// Get the key-value pair for the smallest key in the btree.
+        ///
+        /// This returns the pointers to the key and the value. While you can modify them,
+        /// if you modify the key in such a way that it affects the sorting then things will break.
+        /// Also, the pointers are invalidated on any call that may insert or remove values
+        /// from the btree.
+        pub fn getSmallestPtr(self: *const Self) ?KeyValuePairPtr {
+            if (self.len == 0) {
+                return null;
+            }
+
+            const leftmost_child = self.getLefmostChild();
+
+            return .{ .key = &leftmost_child.keys.items[0], .value = &leftmost_child.values.items[0] };
+        }
+
+        fn getLefmostChild(self: *const Self) *const Node {
+            assert(self.len > 0);
+            var curr_node: *const Node = &self.root;
+            while (curr_node.isLeaf() == false) {
+                curr_node = &curr_node.children.items[0];
+            }
+
+            return curr_node;
+        }
+
+        /// Get the key-value pair for the largest key in the btree.
+        ///
+        /// Returns null if the btree is empty.
+        pub fn getLargest(self: *const Self) ?KeyValuePair {
+            if (self.len == 0) {
+                return null;
+            }
+
+            const rightmost_child = self.getRightmostChild();
+
+            return .{ .key = rightmost_child.keys.getLast(), .value = rightmost_child.values.getLast() };
+        }
+
+        /// Get the key-value pair for the largest key in the btree.
+        ///
+        /// This returns the pointers to the key and the value. While you can modify them,
+        /// if you modify the key in such a way that it affects the sorting then things will break.
+        /// Also, the pointers are invalidated on any call that may insert or remove values
+        /// from the btree.
+        pub fn getLargestPtr(self: *const Self) ?KeyValuePairPtr {
+            if (self.len == 0) {
+                return null;
+            }
+
+            const rightmost_child = self.getRightmostChild();
+            const rightmost_child_len = rightmost_child.len();
+
+            return .{ .key = &rightmost_child.keys.items[rightmost_child_len - 1], .value = &rightmost_child.values.items[rightmost_child_len - 1] };
+        }
+
+        fn getRightmostChild(self: *const Self) *const Node {
+            assert(self.len > 0);
+
+            var curr_node: *const Node = &self.root;
+            while (curr_node.isLeaf() == false) {
+                curr_node = &curr_node.children.getLast();
+            }
+            return curr_node;
         }
 
         /// Remove the key from the btree.
@@ -1105,4 +1187,94 @@ test "btree(crud): 10000 random elements with degree 20" {
 
     try expectEqual(btree.len, map.count());
     try validateBtree(&btree);
+}
+
+test "btree: getSmallest" {
+    var prng = std.Random.DefaultPrng.init(10);
+    var random = prng.random();
+
+    var btree: BtreeType = undefined;
+    try btree.init(4, testing.allocator);
+    defer btree.deinit();
+
+    var keys: [100]usize = undefined;
+    for (0..keys.len) |i| {
+        keys[i] = random.intRangeAtMost(usize, 1, std.math.maxInt(usize));
+    }
+
+    for (keys) |key| {
+        try btree.put(key, key - 1);
+    }
+    std.sort.block(usize, &keys, {}, std.sort.asc(usize));
+
+    const kvp_smallest = btree.getSmallest();
+    try expectEqual(kvp_smallest, BtreeType.KeyValuePair{ .key = keys[0], .value = keys[0] - 1 });
+}
+
+test "btree: getSmallestPtr" {
+    var prng = std.Random.DefaultPrng.init(10);
+    var random = prng.random();
+
+    var btree: BtreeType = undefined;
+    try btree.init(4, testing.allocator);
+    defer btree.deinit();
+
+    var keys: [100]usize = undefined;
+    for (0..keys.len) |i| {
+        keys[i] = random.intRangeAtMost(usize, 1, std.math.maxInt(usize));
+    }
+
+    for (keys) |key| {
+        try btree.put(key, key - 1);
+    }
+    std.sort.block(usize, &keys, {}, std.sort.asc(usize));
+
+    const kvp_smallest = btree.getSmallestPtr();
+    try expectEqual(kvp_smallest.?.key.*, keys[0]);
+    try expectEqual(kvp_smallest.?.value.*, keys[0] - 1);
+}
+
+test "btree: getLargest" {
+    var prng = std.Random.DefaultPrng.init(10);
+    var random = prng.random();
+
+    var btree: BtreeType = undefined;
+    try btree.init(4, testing.allocator);
+    defer btree.deinit();
+
+    var keys: [100]usize = undefined;
+    for (0..keys.len) |i| {
+        keys[i] = random.intRangeAtMost(usize, 1, std.math.maxInt(usize));
+    }
+
+    for (keys) |key| {
+        try btree.put(key, key - 1);
+    }
+    std.sort.block(usize, &keys, {}, std.sort.asc(usize));
+
+    const kvp_largest = btree.getLargest();
+    try expectEqual(kvp_largest, BtreeType.KeyValuePair{ .key = keys[99], .value = keys[99] - 1 });
+}
+
+test "btree: getLargestPtr" {
+    var prng = std.Random.DefaultPrng.init(10);
+    var random = prng.random();
+
+    var btree: BtreeType = undefined;
+    try btree.init(4, testing.allocator);
+    defer btree.deinit();
+
+    var keys: [100]usize = undefined;
+    for (0..keys.len) |i| {
+        keys[i] = random.intRangeAtMost(usize, 1, std.math.maxInt(usize));
+    }
+
+    for (keys) |key| {
+        try btree.put(key, key - 1);
+    }
+    std.sort.block(usize, &keys, {}, std.sort.asc(usize));
+
+    const kvp_largest = btree.getLargestPtr();
+    try expectEqual(kvp_largest.?.key.*, keys[99]);
+    try expectEqual(kvp_largest.?.value.*, keys[99] - 1);
 }
